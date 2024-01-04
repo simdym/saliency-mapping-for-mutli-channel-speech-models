@@ -2,3 +2,6 @@
     path = fairseq/model_parallel/megatron
     url = https://github.com/ngoyal2707/Megatron-LM
     branch = fairseq
+[submodule "segmentation"]
+	path = segmentation
+	url = https://simendym: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@huggingface.co/pyannote/segmentation

@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -64,6 +65,9 @@ class CrossChannelTransformerDecoder(FairseqIncrementalDecoder):
         self.max_target_positions = args.max_target_positions
 
         self.embed_tokens = embed_tokens
+
+        self.tracking_input_gradients = False
+        self.gradients = None
 
         self.embed_scale = 1.0 if args.no_scale_embedding else math.sqrt(embed_dim)
 
@@ -187,6 +191,21 @@ class CrossChannelTransformerDecoder(FairseqIncrementalDecoder):
                 ]
             )
         )
+    
+    def track_input_gradients(self):
+        """Track input gradients for saliency mapping"""
+        self.tracking_input_gradients = True
+        embedding_weights = self.embed_tokens.weight
+        self.embed_tokens = torch.nn.Linear(504, 512, bias=False)
+        self.embed_tokens.weight = nn.Parameter(torch.clone(embedding_weights).transpose(0, 1))
+
+        self.gradients = {}
+        self.onehot_inputs = {}
+
+    def zero_input_grad(self) -> None:
+        for channel in self.gradients:
+            #self.gradients[channel].zero_()
+            self.onehot_inputs[channel].grad.zero_()
 
     def build_decoder_layer(self, args, no_encoder_attn=False):
         layer = StandardTransformerDecoderLayer(args, no_encoder_attn)
@@ -330,7 +349,21 @@ class CrossChannelTransformerDecoder(FairseqIncrementalDecoder):
                     positions = positions[:, -1:]
 
             # embed tokens and positions
-            x = self.embed_tokens(prev_output_tokens[channel])
+            # check if we track input gradients
+            if self.tracking_input_gradients:
+                # go via one-hot and use nn.Linear as embedding layer
+                one_hot_tokens = nn.functional.one_hot(prev_output_tokens[channel], 504).float()
+                one_hot_tokens.grad = torch.zeros_like(one_hot_tokens) # Populate with tensor (since None is not mutable)
+                one_hot_tokens.requires_grad = True
+                one_hot_tokens.retain_grad()
+
+                x = self.embed_tokens(one_hot_tokens)
+
+                self.gradients[channel] = one_hot_tokens.grad
+                self.onehot_inputs[channel] = one_hot_tokens
+            else:
+                # Normal case (use nn.Embedding)
+                x = self.embed_tokens(prev_output_tokens[channel])
 
             if self.project_in_dim is not None:
                 x = self.project_in_dim(x)

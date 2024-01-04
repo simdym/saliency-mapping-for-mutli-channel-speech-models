@@ -166,7 +166,7 @@ class MultichannelSequenceGenerator(nn.Module):
         """
         return self._generate(sample, prefix_tokens, bos_token=bos_token)
 
-    @torch.no_grad()
+    @torch.enable_grad()
     def generate(self, models, sample: Dict[str, Dict[str, Tensor]], **kwargs):
         """Generate translations. Match the api of other fairseq generators.
 
@@ -284,6 +284,14 @@ class MultichannelSequenceGenerator(nn.Module):
             .to(src_tokens)
             .float()
         )  # +1 for eos; pad is never chosen for scoring
+        input_gradients = [[] for channel in range(self.n_channels)] #
+        """
+        (
+            torch.zeros(bsz * beam_size, self.n_channels, max_len + 1)
+            .to(src_tokens)
+            .float()
+        ) # Only support for most likely token in each step
+        """
         tokens = (
             torch.zeros(bsz * beam_size, max_len + 2, self.n_channels)
             .to(src_tokens)
@@ -359,6 +367,7 @@ class MultichannelSequenceGenerator(nn.Module):
                 channel: tokens[:, : step + 1, i]
                 for i, channel in enumerate(self.channels)
             }
+            print("input_size:", input_tokens["unitA"].size())
 
             lprobs_dict, avg_attn_scores = self.model.forward_decoder(
                 input_tokens,
@@ -390,6 +399,11 @@ class MultichannelSequenceGenerator(nn.Module):
                 dur_preds = dur_preds.round().long()
                 dur_preds[dur_preds < 1] = 1
 
+                if step > src_len: # Clone logits before they are modified for backpropagation
+                    logits = torch.stack(lprobs_list) # (n_channels, bsz * beam_size, vocab_size)
+                    lprobs_list = [torch.clone(lprobs) for lprobs in lprobs_list]
+
+                
                 # dur_preds & dur_counter needs to be modified when there isn't an edge
                 if step > 0:
                     non_edge_indices = tokens[:, step, :] == tokens[:, step - 1, :]
@@ -532,6 +546,56 @@ class MultichannelSequenceGenerator(nn.Module):
                 tokens[:, : step + 1],
                 original_batch_idxs,
             )
+
+            if step > src_len:
+                for channel in range(self.n_channels):
+                    duration = dur_counter[0, channel].detach().cpu().item()
+                    print("duration", duration)
+
+                    model = self.model.single_model.decoder
+
+                    if duration == 1: # Only backpropagte if previous unit is not duplicated
+                        gradients = model.gradients # {channel: (bsz * beam_size, step, vocab_size))
+
+                        print("logits", logits.size(), logits.sum())
+                        index = cand_indices[0, 0, channel]
+                        print("channel", channel, "index", index)
+
+                        # logits: (n_channels, bsz * beam_size, vocab_size)
+                        logits[channel, 0, index].backward(retain_graph=True)
+
+                        cur_input_gradients = (
+                            torch.stack(list(gradients.values()))
+                            .sum(-1)
+                            .transpose(0, 1)
+                        ) # (bsz * beam_size, self.n_channels, step)
+
+                        # Pad for uniform size
+                        cur_input_gradients = torch.nn.functional.pad(
+                            cur_input_gradients,
+                            (0, max_len - step),
+                            "constant",
+                            0
+                        ) # (bsz * beam_size, self.n_channels, max_len + 1)
+                        print("cur_input_gradients", cur_input_gradients.size(), cur_input_gradients.sum())
+                        input_gradients[channel].append(cur_input_gradients)
+
+                        # Zero the gradients for the next step
+                        model.zero_grad() 
+                        model.zero_input_grad()
+                    else: # If the unit is duplicated, we copy the previous one
+                        if len(input_gradients[channel]) > 0:
+                            print("last_input_gradients", input_gradients[channel][-1].size(), input_gradients[channel][-1].sum())
+                            input_gradients[channel].append(input_gradients[channel][-1])
+                        else: # If the first token is duplicated, we save a zero tensor (there are no gradients to save yet)
+                            input_gradients[channel].append(
+                                torch.zeros(
+                                    bsz * beam_size,
+                                    self.n_channels,
+                                    max_len + 1
+                                ).to(src_tokens)
+                            )
+                        
 
             # cand_bbsz_idx contains beam indices for the top candidate
             # hypotheses, with a range of values: [0, bsz*beam_size),
@@ -706,6 +770,8 @@ class MultichannelSequenceGenerator(nn.Module):
 
             # reorder incremental state in decoder
             reorder_state = active_bbsz_idx
+
+        finalized[0][0]["input_gradients"] = input_gradients
 
         # sort by score descending
         for sent in range(len(finalized)):
@@ -967,7 +1033,7 @@ class MultichannelEnsembleModel(nn.Module):
             if self.has_encoder():
                 encoder_out = encoder_outs[i]
             # decode each model
-            if self.has_incremental_states():
+            if False: #self.has_incremental_states():
                 decoder_out = model.decoder.forward(
                     tokens,
                     encoder_out=encoder_out,

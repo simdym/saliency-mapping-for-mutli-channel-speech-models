@@ -74,5 +74,5 @@ class HifiganVocoder:
         assert len(codes) == 2
         wav1 = self.code2wav(codes[0], speaker_ids[0], pred_dur)
         wav2 = self.code2wav(codes[1], speaker_ids[1], pred_dur)
-        wav = np.stack([wav1, wav2])
-        return wav
+        #wav = np.stack([wav1, wav2])
+        return wav1, wav2

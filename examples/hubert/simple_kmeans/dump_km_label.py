@@ -41,7 +41,7 @@ class ApplyKmeans(object):
                 - 2 * torch.matmul(x, self.C)
                 + self.Cnorm
             )
-            return dist.argmin(dim=1).cpu().numpy()
+            return dist.argmin(dim=1), dist#.cpu().numpy()
         else:
             dist = (
                 (x ** 2).sum(1, keepdims=True)

@@ -426,7 +426,7 @@ class SpeechDLMTask(LegacyFairseqTask):
     def inference_step(
         self, generator, models, sample, prefix_tokens=None, constraints=None
     ):
-        with torch.no_grad():
+        with torch.enable_grad(): # Edited
             # Generation will always be conditioned on bos_token
             if getattr(self.args, "add_bos_token", False):
                 bos_token = self.source_dictionary.bos()
